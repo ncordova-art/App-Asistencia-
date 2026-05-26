@@ -1,0 +1,32 @@
+# Archivos de Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Archivos de Firebase
+firebase_options.dart
+
+# Archivos de IDE y Sistema
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# Archivos de Windows/Linux específicos
+windows/flutter/ephemeral/
+linux/flutter/ephemeral/
+*.exe
+*.dll
+*.so
+
+# Logs
+*.log
+
+# Secretos (si los hubiera)
+.env*
