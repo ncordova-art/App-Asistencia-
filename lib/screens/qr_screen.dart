@@ -1,34 +1,28 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:math';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../app_visuals.dart';
+import '../services/supabase_service.dart';
 import 'login_tienda_screen.dart';
 
 class QRScreen extends StatefulWidget {
-  final String tiendaDocId;
   final String idTienda;
   final String nombreTienda;
-  final String nombreSede;
-  final String idSede;
   final String direccion;
   final String correo;
+  final String sessionId;
 
   const QRScreen({
     super.key,
-    required this.tiendaDocId,
     required this.idTienda,
     required this.nombreTienda,
-    required this.nombreSede,
-    required this.idSede,
     required this.direccion,
     required this.correo,
+    required this.sessionId,
   });
 
   @override
@@ -36,166 +30,95 @@ class QRScreen extends StatefulWidget {
 }
 
 class _QRScreenState extends State<QRScreen> {
+  final _supabaseService = SupabaseService.instance;
+
   String _qrData = '';
+  bool _cargando = true;
+  String? _errorQr;
   int _segundosRestantes = 30;
-  Timer? _timerQR;
-  Timer? _timerContador;
-  bool _generando = false;
-  bool _qrActivoValido = false;
-  String? _errorQrActivo;
+  Timer? _timerQr;
+  Timer? _timerSesion;
 
   @override
   void initState() {
     super.initState();
-    _verificarYIniciar();
+    _prepararQr();
+    _iniciarTimers();
   }
 
   @override
   void dispose() {
-    _timerQR?.cancel();
-    _timerContador?.cancel();
+    _timerQr?.cancel();
+    _timerSesion?.cancel();
     super.dispose();
   }
 
   void _iniciarTimers() {
-    _timerQR?.cancel();
-    _timerContador?.cancel();
+    _timerQr?.cancel();
+    _timerSesion?.cancel();
 
-    _timerQR = Timer.periodic(const Duration(seconds: 30), (_) async {
-      await _generarQR();
-      if (mounted) {
-        setState(() => _segundosRestantes = 30);
-      }
-    });
-
-    _timerContador = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      if (_segundosRestantes > 0) {
+    _timerQr = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _cargando || _errorQr != null) return;
+      if (_segundosRestantes <= 1) {
+        _prepararQr(mostrarCarga: false);
+      } else {
         setState(() => _segundosRestantes--);
       }
     });
-  }
 
-  Future<void> _verificarYIniciar() async {
-    final valido = await _verificarEstadoQrActivo();
-    if (!mounted) return;
-
-    if (!valido) {
-      setState(() {
-        _qrActivoValido = false;
-        _errorQrActivo =
-            'El QR activo no está habilitado o no coincide con esta tienda.';
-      });
-      return;
-    }
-
-    setState(() {
-      _qrActivoValido = true;
-      _errorQrActivo = null;
-      _segundosRestantes = 30;
+    _timerSesion = Timer.periodic(const Duration(seconds: 15), (_) {
+      _renovarSesion();
     });
-
-    await _generarQR();
-    _iniciarTimers();
   }
 
-  Future<bool> _verificarEstadoQrActivo() async {
+  Future<void> _renovarSesion() async {
     try {
-      final doc = await FirebaseFirestore.instance
-          .collection('qr_activos')
-          .doc(widget.idTienda)
-          .get();
+      final activa = await _supabaseService.renovarSesionTienda(
+        idTienda: widget.idTienda,
+        sessionId: widget.sessionId,
+      );
 
-      if (!doc.exists) {
-        return false;
-      }
-
-      final data = doc.data();
-      if (data == null) {
-        return false;
-      }
-
-      final activo = data['activo'] as bool?;
-      final idTiendaQr = (data['id_tienda'] ?? doc.id).toString();
-
-      return activo == true && idTiendaQr == widget.idTienda;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  String _generarToken() {
-    const chars = 'abcdef0123456789';
-    final rng = Random.secure();
-    return List.generate(32, (_) => chars[rng.nextInt(chars.length)]).join();
-  }
-
-  Future<void> _generarQR() async {
-    if (_generando || !_qrActivoValido) return;
-    _generando = true;
-
-    final sigueValido = await _verificarEstadoQrActivo();
-    if (!sigueValido) {
-      if (mounted) {
+      if (!activa && mounted) {
+        await _limpiarSesionLocal();
         setState(() {
-          _qrActivoValido = false;
-          _errorQrActivo = 'El QR activo fue deshabilitado.';
-        });
-      }
-      _generando = false;
-      return;
-    }
-
-    try {
-      final nuevoToken = _generarToken();
-      final expira = DateTime.now().add(const Duration(seconds: 30));
-
-      final qrData = {
-        'token': nuevoToken,
-        'id_tienda': widget.idTienda,
-        'id_sede': widget.idSede,
-        'nombre_tienda': widget.nombreTienda,
-        'nombre_sede': widget.nombreSede,
-        'direccion': widget.direccion,
-      };
-
-      await FirebaseFirestore.instance
-          .collection('qr_activos')
-          .doc(widget.idTienda)
-          .set({
-            'activo': true,
-            'direccion': widget.direccion,
-            'fecha_creada': FieldValue.serverTimestamp(),
-            'expira': Timestamp.fromDate(expira),
-            'id_sede': widget.idSede,
-            'id_tienda': widget.idTienda,
-            'nombre_sede': widget.nombreSede,
-            'nombre_tienda': widget.nombreTienda,
-            'token': nuevoToken,
-          }, SetOptions(merge: true));
-
-      if (mounted) {
-        setState(() {
-          _qrData = jsonEncode(qrData);
-          _segundosRestantes = 30;
+          _errorQr = 'La tienda fue abierta en otro dispositivo.';
+          _cargando = false;
         });
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error generando QR: $e')));
-      }
-    } finally {
-      _generando = false;
+      if (!mounted) return;
+      setState(() {
+        _errorQr = 'No se pudo renovar la sesion: $e';
+        _cargando = false;
+      });
     }
   }
 
-  Future<void> _liberarUsoTienda() async {
-    await FirebaseFirestore.instance
-        .collection('tienda')
-        .doc(widget.tiendaDocId)
-        .set({'usado': false}, SetOptions(merge: true));
+  Future<void> _prepararQr({bool mostrarCarga = true}) async {
+    setState(() {
+      _cargando = mostrarCarga;
+      _errorQr = null;
+    });
+
+    try {
+      final qr = await _supabaseService.obtenerPayloadQrTienda(
+        idTienda: widget.idTienda,
+        sessionId: widget.sessionId,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _qrData = qr['payload'].toString();
+        _segundosRestantes = 30;
+        _cargando = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorQr = 'No se pudo preparar el QR: $e';
+        _cargando = false;
+      });
+    }
   }
 
   Future<void> _cerrarSesion() async {
@@ -205,7 +128,7 @@ class _QRScreenState extends State<QRScreen> {
         backgroundColor: AppPalette.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
         title: Text(
-          'Cerrar sesión',
+          'Cerrar sesion',
           style: GoogleFonts.bebasNeue(
             color: Colors.white,
             fontSize: 22,
@@ -213,7 +136,7 @@ class _QRScreenState extends State<QRScreen> {
           ),
         ),
         content: Text(
-          '¿Seguro que quieres cerrar sesión en esta tienda?',
+          'Seguro que quieres cerrar sesion en esta tienda?',
           style: GoogleFonts.robotoCondensed(color: Colors.white70),
         ),
         actions: [
@@ -224,7 +147,7 @@ class _QRScreenState extends State<QRScreen> {
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text(
-              'Cerrar sesión',
+              'Cerrar sesion',
               style: TextStyle(color: AppPalette.crimson),
             ),
           ),
@@ -234,25 +157,11 @@ class _QRScreenState extends State<QRScreen> {
 
     if (confirmar != true) return;
 
-    try {
-      await _liberarUsoTienda();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('No se pudo liberar la cuenta: $e')),
-        );
-      }
-      return;
-    }
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('tienda_doc_id');
-    await prefs.remove('id_tienda');
-    await prefs.remove('nombre_tienda');
-    await prefs.remove('nombre_sede');
-    await prefs.remove('id_sede');
-    await prefs.remove('direccion');
-    await prefs.remove('correo');
+    await _supabaseService.cerrarSesionTienda(
+      idTienda: widget.idTienda,
+      sessionId: widget.sessionId,
+    );
+    await _limpiarSesionLocal();
 
     if (!mounted) return;
     Navigator.pushReplacement(
@@ -261,17 +170,17 @@ class _QRScreenState extends State<QRScreen> {
     );
   }
 
+  Future<void> _limpiarSesionLocal() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('id_tienda');
+    await prefs.remove('nombre');
+    await prefs.remove('direccion');
+    await prefs.remove('correo');
+    await prefs.remove('tienda_session_id');
+  }
+
   @override
   Widget build(BuildContext context) {
-    Color colorCountdown;
-    if (_segundosRestantes > 10) {
-      colorCountdown = const Color(0xFF4ECA8B);
-    } else if (_segundosRestantes > 5) {
-      colorCountdown = Colors.orange;
-    } else {
-      colorCountdown = AppPalette.crimson;
-    }
-
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
@@ -282,7 +191,7 @@ class _QRScreenState extends State<QRScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'QR DINÁMICO',
+              'QR TIENDA',
               style: GoogleFonts.bebasNeue(
                 fontSize: 20,
                 letterSpacing: 2.4,
@@ -302,7 +211,7 @@ class _QRScreenState extends State<QRScreen> {
           IconButton(
             icon: const Icon(Icons.logout, color: Colors.white),
             onPressed: _cerrarSesion,
-            tooltip: 'Cerrar sesión',
+            tooltip: 'Cerrar sesion',
           ),
         ],
       ),
@@ -313,210 +222,213 @@ class _QRScreenState extends State<QRScreen> {
               padding: const EdgeInsets.fromLTRB(24, 88, 24, 24),
               child: FrostedPanel(
                 padding: const EdgeInsets.fromLTRB(22, 24, 22, 22),
-                child: _errorQrActivo != null
-                    ? Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.qr_code_2_rounded,
-                            size: 54,
-                            color: Colors.white.withValues(alpha: 0.88),
-                          ),
-                          const SizedBox(height: 16),
-                          Text(
-                            _errorQrActivo!,
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.robotoCondensed(
-                              fontSize: 16,
-                              height: 1.35,
-                              color: Colors.white,
-                            ),
-                          ),
-                          const SizedBox(height: 22),
-                          ElevatedButton(
-                            onPressed: _verificarYIniciar,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: AppPalette.crimson,
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 24,
-                                vertical: 14,
-                              ),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(14),
-                              ),
-                            ),
-                            child: Text(
-                              'Reintentar',
-                              style: GoogleFonts.robotoCondensed(
-                                fontSize: 15,
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ],
-                      )
-                    : _qrData.isEmpty
-                    ? const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 56),
-                        child: CircularProgressIndicator(
-                          color: AppPalette.crimson,
-                        ),
-                      )
-                    : Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: 0.08),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.12),
-                              ),
-                            ),
-                            child: Column(
-                              children: [
-                                Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 6,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      gradient: const LinearGradient(
-                                        colors: [
-                                          AppPalette.crimson,
-                                          AppPalette.electricBlueSoft,
-                                        ],
-                                      ),
-                                      borderRadius: BorderRadius.circular(999),
-                                    ),
-                                    child: Text(
-                                      'Activo',
-                                      style: GoogleFonts.robotoCondensed(
-                                        fontSize: 12,
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 1,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 14),
-                                Container(
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white,
-                                    borderRadius: BorderRadius.circular(24),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: AppPalette.crimson.withValues(
-                                          alpha: 0.16,
-                                        ),
-                                        blurRadius: 26,
-                                        offset: const Offset(0, 12),
-                                      ),
-                                    ],
-                                  ),
-                                  child: QrImageView(
-                                    data: _qrData,
-                                    size: 270,
-                                    backgroundColor: Colors.white,
-                                    errorCorrectionLevel: QrErrorCorrectLevel.H,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 24),
-                          Text(
-                            widget.nombreTienda.toUpperCase(),
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.bebasNeue(
-                              fontSize: 30,
-                              color: Colors.white,
-                              letterSpacing: 2.2,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            widget.nombreSede,
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.robotoCondensed(
-                              fontSize: 16,
-                              color: Colors.white70,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            widget.direccion,
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.robotoCondensed(
-                              fontSize: 13,
-                              height: 1.35,
-                              color: Colors.white54,
-                              letterSpacing: 0.4,
-                            ),
-                          ),
-                          const SizedBox(height: 24),
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 14,
-                            ),
-                            decoration: BoxDecoration(
-                              color: colorCountdown.withValues(alpha: 0.12),
-                              border: Border.all(
-                                color: colorCountdown.withValues(alpha: 0.42),
-                              ),
-                              borderRadius: BorderRadius.circular(22),
-                            ),
-                            child: Row(
-                              children: [
-                                Icon(
-                                  Icons.timer_outlined,
-                                  color: colorCountdown,
-                                  size: 20,
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    'Cambia en $_segundosRestantes segundos',
-                                    style: GoogleFonts.robotoCondensed(
-                                      fontSize: 15,
-                                      color: colorCountdown,
-                                      fontWeight: FontWeight.w700,
-                                      letterSpacing: 0.5,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 14),
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(999),
-                            child: LinearProgressIndicator(
-                              value: _segundosRestantes / 30,
-                              backgroundColor: Colors.white12,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                colorCountdown,
-                              ),
-                              minHeight: 8,
-                            ),
-                          ),
-                        ],
-                      ),
+                child: _buildContent(),
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildContent() {
+    if (_cargando) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 56),
+        child: Center(
+          child: CircularProgressIndicator(color: AppPalette.crimson),
+        ),
+      );
+    }
+
+    if (_errorQr != null) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.qr_code_2_rounded,
+            size: 54,
+            color: Colors.white.withValues(alpha: 0.88),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            _errorQr!,
+            textAlign: TextAlign.center,
+            style: GoogleFonts.robotoCondensed(
+              fontSize: 16,
+              height: 1.35,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 22),
+          ElevatedButton(
+            onPressed: _prepararQr,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppPalette.crimson,
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+            ),
+            child: Text(
+              'Reintentar',
+              style: GoogleFonts.robotoCondensed(
+                fontSize: 15,
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+          ),
+          child: Column(
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [AppPalette.crimson, AppPalette.electricBlueSoft],
+                    ),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    'Activo',
+                    style: GoogleFonts.robotoCondensed(
+                      fontSize: 12,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppPalette.crimson.withValues(alpha: 0.16),
+                      blurRadius: 26,
+                      offset: const Offset(0, 12),
+                    ),
+                  ],
+                ),
+                child: QrImageView(
+                  data: _qrData,
+                  size: 270,
+                  backgroundColor: Colors.white,
+                  errorCorrectionLevel: QrErrorCorrectLevel.H,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+        Text(
+          widget.nombreTienda.toUpperCase(),
+          textAlign: TextAlign.center,
+          style: GoogleFonts.bebasNeue(
+            fontSize: 30,
+            color: Colors.white,
+            letterSpacing: 2.2,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          widget.correo,
+          textAlign: TextAlign.center,
+          style: GoogleFonts.robotoCondensed(
+            fontSize: 15,
+            color: Colors.white70,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          widget.direccion,
+          textAlign: TextAlign.center,
+          style: GoogleFonts.robotoCondensed(
+            fontSize: 13,
+            height: 1.35,
+            color: Colors.white54,
+            letterSpacing: 0.4,
+          ),
+        ),
+        const SizedBox(height: 24),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          decoration: BoxDecoration(
+            color: const Color(0xFF4ECA8B).withValues(alpha: 0.12),
+            border: Border.all(
+              color: const Color(0xFF4ECA8B).withValues(alpha: 0.42),
+            ),
+            borderRadius: BorderRadius.circular(22),
+          ),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.lock_clock_outlined,
+                color: Color(0xFF4ECA8B),
+                size: 20,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Token QR activo',
+                  style: GoogleFonts.robotoCondensed(
+                    fontSize: 15,
+                    color: const Color(0xFF4ECA8B),
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: LinearProgressIndicator(
+            value: _segundosRestantes / 30,
+            minHeight: 8,
+            backgroundColor: Colors.white.withValues(alpha: 0.12),
+            valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF4ECA8B)),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Actualiza en $_segundosRestantes segundos',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.robotoCondensed(
+            fontSize: 13,
+            color: Colors.white60,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
     );
   }
 }

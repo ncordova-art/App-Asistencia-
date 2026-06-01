@@ -1,9 +1,11 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../app_visuals.dart';
+import '../services/supabase_service.dart';
 import 'qr_screen.dart';
 
 class LoginTiendaScreen extends StatefulWidget {
@@ -16,6 +18,7 @@ class LoginTiendaScreen extends StatefulWidget {
 class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
   final _correoController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _supabaseService = SupabaseService.instance;
 
   bool _cargando = true;
   bool _procesando = false;
@@ -31,40 +34,30 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
     return valor.trim().toLowerCase();
   }
 
-  Map<String, dynamic> _mapearTienda(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data() ?? <String, dynamic>{};
-
-    return {
-      'docId': doc.id,
-      'id_tienda': (data['id_tienda'] ?? doc.id).toString(),
-      'nombre_tienda': (data['nombre_tienda'] ?? '').toString(),
-      'nombre_sede': (data['nombre_sede'] ?? '').toString(),
-      'id_sede': (data['id_sede'] ?? '').toString(),
-      'direccion': (data['direccion'] ?? '').toString(),
-      'correo': (data['correo'] ?? '').toString().trim(),
-      'password': (data['password'] ?? data['contrasena'] ?? '').toString(),
-      'usado': data['usado'] == true,
-    };
-  }
-
-  Future<Map<String, dynamic>?> _buscarTiendaPorDocId(String docId) async {
-    final doc =
-        await FirebaseFirestore.instance.collection('tienda').doc(docId).get();
-
-    if (!doc.exists) {
-      return null;
-    }
-
-    return _mapearTienda(doc);
-  }
-
   Future<void> _verificarSesionGuardada() async {
     final prefs = await SharedPreferences.getInstance();
-    final tiendaDocId = prefs.getString('tienda_doc_id');
+    final idTienda = prefs.getString('id_tienda');
+    final sessionId = prefs.getString('tienda_session_id');
+    final tiendaGuardada = _tiendaGuardadaDesdePrefs(prefs);
 
-    if (tiendaDocId != null) {
+    if (idTienda != null &&
+        idTienda.isNotEmpty &&
+        sessionId != null &&
+        sessionId.isNotEmpty) {
       try {
-        final tiendaActual = await _buscarTiendaPorDocId(tiendaDocId);
+        final sesionValida = await _supabaseService.renovarSesionTienda(
+          idTienda: idTienda,
+          sessionId: sessionId,
+        );
+        if (!sesionValida) {
+          await _limpiarSesionLocal();
+          if (mounted) {
+            setState(() => _cargando = false);
+          }
+          return;
+        }
+
+        final tiendaActual = await _supabaseService.buscarTiendaPorId(idTienda);
         if (tiendaActual == null) {
           await _limpiarSesionLocal();
           if (mounted) {
@@ -73,45 +66,15 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
           return;
         }
 
-        await FirebaseFirestore.instance
-            .collection('tienda')
-            .doc(tiendaDocId)
-            .set({'usado': true}, SetOptions(merge: true));
-
-        await prefs.setString('id_tienda', tiendaActual['id_tienda'] as String);
-        await prefs.setString(
-          'nombre_tienda',
-          tiendaActual['nombre_tienda'] as String,
-        );
-        await prefs.setString(
-          'nombre_sede',
-          tiendaActual['nombre_sede'] as String,
-        );
-        await prefs.setString('id_sede', tiendaActual['id_sede'] as String);
-        await prefs.setString(
-          'direccion',
-          tiendaActual['direccion'] as String,
-        );
-        await prefs.setString('correo', tiendaActual['correo'] as String);
-
+        await _guardarSesionLocal(tiendaActual);
         if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => QRScreen(
-              tiendaDocId: tiendaDocId,
-              idTienda: tiendaActual['id_tienda'] as String,
-              nombreTienda: tiendaActual['nombre_tienda'] as String,
-              nombreSede: tiendaActual['nombre_sede'] as String,
-              idSede: tiendaActual['id_sede'] as String,
-              direccion: tiendaActual['direccion'] as String,
-              correo: tiendaActual['correo'] as String,
-            ),
-          ),
-        );
+        _abrirQr(tiendaActual, sessionId);
         return;
       } catch (_) {
-        await _limpiarSesionLocal();
+        if (tiendaGuardada != null && mounted) {
+          _abrirQr(tiendaGuardada, sessionId);
+          return;
+        }
       }
     }
 
@@ -120,67 +83,50 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
     }
   }
 
+  Map<String, dynamic>? _tiendaGuardadaDesdePrefs(SharedPreferences prefs) {
+    final idTienda = prefs.getString('id_tienda');
+    final nombre = prefs.getString('nombre');
+    final direccion = prefs.getString('direccion');
+    final correo = prefs.getString('correo');
+
+    if (idTienda == null ||
+        idTienda.isEmpty ||
+        nombre == null ||
+        nombre.isEmpty ||
+        direccion == null ||
+        correo == null) {
+      return null;
+    }
+
+    return {
+      'id_tienda': idTienda,
+      'nombre': nombre,
+      'direccion': direccion,
+      'correo': correo,
+    };
+  }
+
   Future<void> _limpiarSesionLocal() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('tienda_doc_id');
     await prefs.remove('id_tienda');
-    await prefs.remove('nombre_tienda');
-    await prefs.remove('nombre_sede');
-    await prefs.remove('id_sede');
+    await prefs.remove('nombre');
     await prefs.remove('direccion');
     await prefs.remove('correo');
+    await prefs.remove('tienda_session_id');
   }
 
-  Future<Map<String, dynamic>?> _buscarTiendaPorCorreo(String correo) async {
-    final correoNormalizado = _normalizarCorreo(correo);
-    final snapExacto = await FirebaseFirestore.instance
-        .collection('tienda')
-        .where('correo', isEqualTo: correoNormalizado)
-        .limit(1)
-        .get();
-
-    if (snapExacto.docs.isNotEmpty) {
-      return _mapearTienda(snapExacto.docs.first);
+  Future<void> _guardarSesionLocal(
+    Map<String, dynamic> tienda, {
+    String? sessionId,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('id_tienda', tienda['id_tienda'] as String);
+    await prefs.setString('nombre', tienda['nombre'] as String);
+    await prefs.setString('direccion', tienda['direccion'] as String);
+    await prefs.setString('correo', tienda['correo'] as String);
+    if (sessionId != null) {
+      await prefs.setString('tienda_session_id', sessionId);
     }
-
-    final snap = await FirebaseFirestore.instance.collection('tienda').get();
-
-    for (final doc in snap.docs) {
-      final tienda = _mapearTienda(doc);
-      if (_normalizarCorreo(tienda['correo'] as String) == correoNormalizado) {
-        return tienda;
-      }
-    }
-
-    return null;
-  }
-
-  Future<bool> _validarQrActivo(Map<String, dynamic> tienda) async {
-    final qrActivoDoc = await FirebaseFirestore.instance
-        .collection('qr_activos')
-        .doc(tienda['id_tienda'] as String)
-        .get();
-
-    if (!qrActivoDoc.exists) {
-      _mostrarMensaje('No se encontró un QR activo para esta tienda.');
-      return false;
-    }
-
-    final data = qrActivoDoc.data();
-    if (data == null) {
-      _mostrarMensaje('El documento QR activo es inválido.');
-      return false;
-    }
-
-    final activo = data['activo'] as bool?;
-    final idTiendaQr = (data['id_tienda'] ?? qrActivoDoc.id).toString();
-
-    if (activo != true || idTiendaQr != tienda['id_tienda']) {
-      _mostrarMensaje('El QR activo no coincide con la tienda registrada.');
-      return false;
-    }
-
-    return true;
   }
 
   Future<void> _ingresar() async {
@@ -188,67 +134,47 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
     final passwordIngresado = _passwordController.text.trim();
 
     if (correoIngresado.isEmpty || passwordIngresado.isEmpty) {
-      _mostrarMensaje('Ingresa tu correo y contraseña.');
+      _mostrarMensaje('Ingresa tu correo y contrasena.');
       return;
     }
 
     setState(() => _procesando = true);
 
     try {
-      final tienda = await _buscarTiendaPorCorreo(correoIngresado);
+      final tienda = await _supabaseService.loginTienda(
+        correo: correoIngresado,
+        contrasena: passwordIngresado,
+      );
 
       if (tienda == null) {
-        _mostrarMensaje('No existe una tienda con ese correo.');
+        _mostrarMensaje('Correo o contrasena incorrectos.');
         return;
       }
 
-      if (passwordIngresado != tienda['password']) {
-        _mostrarMensaje('La contraseña es incorrecta.');
+      await _supabaseService.asegurarQrEstatico(
+        idTienda: tienda['id_tienda'] as String,
+      );
+
+      final sessionId = await _obtenerOSCrearSessionId();
+      final sesion = await _supabaseService.iniciarSesionTienda(
+        idTienda: tienda['id_tienda'] as String,
+        sessionId: sessionId,
+        dispositivo: 'app_qr',
+      );
+
+      if (sesion['permitido'] != true) {
+        _mostrarMensaje(
+          (sesion['mensaje'] ?? 'Esta tienda ya esta abierta.').toString(),
+        );
         return;
       }
 
-      if (tienda['usado'] == true) {
-        _mostrarMensaje('Esta cuenta ya está en uso en otro dispositivo.');
-        return;
-      }
-
-      final qrActivoValido = await _validarQrActivo(tienda);
-      if (!qrActivoValido) {
-        return;
-      }
-
-      await FirebaseFirestore.instance
-          .collection('tienda')
-          .doc(tienda['docId'] as String)
-          .set({'usado': true}, SetOptions(merge: true));
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('tienda_doc_id', tienda['docId'] as String);
-      await prefs.setString('id_tienda', tienda['id_tienda'] as String);
-      await prefs.setString('nombre_tienda', tienda['nombre_tienda'] as String);
-      await prefs.setString('nombre_sede', tienda['nombre_sede'] as String);
-      await prefs.setString('id_sede', tienda['id_sede'] as String);
-      await prefs.setString('direccion', tienda['direccion'] as String);
-      await prefs.setString('correo', tienda['correo'] as String);
+      await _guardarSesionLocal(tienda, sessionId: sessionId);
 
       if (!mounted) return;
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => QRScreen(
-            tiendaDocId: tienda['docId'] as String,
-            idTienda: tienda['id_tienda'] as String,
-            nombreTienda: tienda['nombre_tienda'] as String,
-            nombreSede: tienda['nombre_sede'] as String,
-            idSede: tienda['id_sede'] as String,
-            direccion: tienda['direccion'] as String,
-            correo: tienda['correo'] as String,
-          ),
-        ),
-      );
+      _abrirQr(tienda, sessionId);
     } catch (e) {
-      _mostrarMensaje('Error iniciando sesión: $e');
+      _mostrarMensaje('Error iniciando sesion: $e');
     } finally {
       if (mounted) {
         setState(() => _procesando = false);
@@ -256,11 +182,43 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
     }
   }
 
+  Future<String> _obtenerOSCrearSessionId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final existente = prefs.getString('tienda_session_id');
+    if (existente != null && existente.isNotEmpty) {
+      return existente;
+    }
+
+    const chars = 'abcdef0123456789';
+    final random = Random.secure();
+    final sessionId = List.generate(
+      32,
+      (_) => chars[random.nextInt(chars.length)],
+    ).join();
+    await prefs.setString('tienda_session_id', sessionId);
+    return sessionId;
+  }
+
+  void _abrirQr(Map<String, dynamic> tienda, String sessionId) {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => QRScreen(
+          idTienda: tienda['id_tienda'] as String,
+          nombreTienda: tienda['nombre'] as String,
+          direccion: tienda['direccion'] as String,
+          correo: tienda['correo'] as String,
+          sessionId: sessionId,
+        ),
+      ),
+    );
+  }
+
   void _mostrarMensaje(String mensaje) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(mensaje)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(mensaje)));
   }
 
   @override
@@ -346,7 +304,7 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
                               ),
                               const SizedBox(height: 18),
                               Text(
-                                'Accede con la cuenta asignada para mostrar el QR dinámico de la sede.',
+                                'Accede con la cuenta asignada para mostrar el QR de la tienda.',
                                 style: GoogleFonts.robotoCondensed(
                                   fontSize: 16,
                                   height: 1.35,
@@ -378,7 +336,7 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
                               ),
                               const SizedBox(height: 22),
                               Text(
-                                'CONTRASEÑA',
+                                'CONTRASENA',
                                 style: GoogleFonts.robotoCondensed(
                                   fontSize: 12,
                                   color: Colors.white70,
@@ -397,7 +355,7 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
                                   letterSpacing: 1.2,
                                 ),
                                 decoration: appInputDecoration(
-                                  hintText: 'Ingresa tu contraseña',
+                                  hintText: 'Ingresa tu contrasena',
                                   suffixIcon: IconButton(
                                     onPressed: () {
                                       setState(
@@ -474,7 +432,7 @@ class _LoginTiendaScreenState extends State<LoginTiendaScreen> {
                               const SizedBox(height: 18),
                               Center(
                                 child: Text(
-                                  'Solo para uso del área de sistemas',
+                                  'Solo para uso del area de sistemas',
                                   textAlign: TextAlign.center,
                                   style: GoogleFonts.robotoCondensed(
                                     fontSize: 11,

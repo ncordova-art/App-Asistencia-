@@ -1,15 +1,23 @@
-import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'app_visuals.dart';
-import 'firebase_options.dart';
 import 'screens/login_tienda_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await Supabase.initialize(
+    url: SupabaseOptions.supabaseUrl,
+    anonKey: SupabaseOptions.supabaseKey,
+  );
   runApp(const QRApp());
+}
+
+class SupabaseOptions {
+  static const String supabaseUrl = 'https://tlmsnenvqqblmmtimung.supabase.co';
+  static const String supabaseKey =
+      'sb_publishable_wnlnQ6sVmbsvHjklJx1uOw_sxhxC2aw';
 }
 
 class QRApp extends StatelessWidget {
